@@ -1,0 +1,54 @@
+#!/usr/bin/env ruby
+
+require 'net/ssh'
+require 'reline'
+
+Readline = Reline
+
+hosts = ARGV
+padding = hosts.map(&:length).max + 2
+
+sessions = hosts.map { |h|
+  STDERR.puts "[setup] #{h}"
+  [ h, Net::SSH.start(h, 'zomo') ]
+}.to_h
+
+loop do
+  cmd = Readline.readline("$ ")
+  exit if cmd.nil?
+  next if cmd.empty?
+
+  sessions.each do |hostname, session|
+    STDERR.puts "[exec] #{hostname}"
+
+    prefix = "[#{hostname}]".ljust(padding)
+
+    session.open_channel do |channel|
+      channel.exec(cmd) do |ch, success|
+        raise RuntimeError, "exec #{hostname} #{cmd} failed" unless success
+
+        ch.on_data do |ch, data|
+          STDOUT.puts "#{prefix}   #{data}"
+        end
+
+        ch.on_extended_data do |ch, type, data|
+          STDOUT.puts "#{prefix} ! #{data}" if type == 1
+        end
+
+        ch.on_request("exit-status") do |ch, data|
+          code = data.read_long
+          STDOUT.puts "#{prefix} = #{code}"
+        end
+      end
+    end
+  end
+
+  condition = Proc.new { |s| s.busy? }
+
+  pending = sessions.keys
+  loop do
+    pending.delete_if { |h| !sessions[h].process(0.1, &condition) }
+    break if pending.empty?
+  end
+
+end
