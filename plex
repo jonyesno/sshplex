@@ -1,16 +1,39 @@
 #!/usr/bin/env ruby
 
 require 'net/ssh'
+require 'optparse'
 require 'reline'
 
 Readline = Reline
+options = {}
+op = OptionParser.new do |opts|
+  opts.banner  = "usage: plex [ options ] hosts"
+
+  options[:user] = 'zomo'
+  opts.on("-u", "--user=USER", "remote ssh user") { |o| options[:user] = o }
+
+  opts.on("-h", "--help") do
+    puts opts
+    exit
+  end
+end
+op.parse!
 
 hosts = ARGV
+raise OptionParser::MissingArgument, "\n#{op.banner}" if hosts.empty?
 padding = hosts.map(&:length).max + 2
+
+path = "#{ENV['HOME']}/tmp/plex"
+FileUtils.mkdir_p(path)
 
 sessions = hosts.map { |h|
   STDERR.puts "[setup] #{h}"
-  [ h, Net::SSH.start(h, 'zomo') ]
+  [ h, {
+         :ssh    => Net::SSH.start(h, options[:user]),
+         :stdout => File.open("#{path}/#{h}.stdout", "w+"),
+         :stderr => File.open("#{path}/#{h}.stderr", "w+"),
+       }
+  ]
 }.to_h
 
 loop do
@@ -18,26 +41,42 @@ loop do
   exit if cmd.nil?
   next if cmd.empty?
 
-  sessions.each do |hostname, session|
+  sessions.each do |hostname, config|
+
     STDERR.puts "[exec] #{hostname}"
 
     prefix = "[#{hostname}]".ljust(padding)
+    config[:stdout].puts "# command: #{cmd}"
+    config[:stderr].puts "# command: #{cmd}"
 
-    session.open_channel do |channel|
+    config[:ssh].open_channel do |channel|
       channel.exec(cmd) do |ch, success|
         raise RuntimeError, "exec #{hostname} #{cmd} failed" unless success
 
         ch.on_data do |ch, data|
-          STDOUT.puts "#{prefix}   #{data}"
+          config[:stdout].puts data
+          config[:stdout].flush
         end
 
         ch.on_extended_data do |ch, type, data|
-          STDOUT.puts "#{prefix} ! #{data}" if type == 1
+          config[:stderr].puts data if type == 1
+          config[:stderr].flush
         end
 
         ch.on_request("exit-status") do |ch, data|
           code = data.read_long
-          STDOUT.puts "#{prefix} = #{code}"
+          config[:stdout].puts "# exit: #{code}"
+          config[:stderr].puts "# exit: #{code}"
+          config[:stdout].flush
+          config[:stderr].flush
+        end
+
+        ch.on_request("exit-signal") do |ch, data|
+          signal = data.read_long
+          config[:stdout].puts "# signal: #{signal}"
+          config[:stderr].puts "# signal: #{signal}"
+          config[:stdout].flush
+          config[:stderr].flush
         end
       end
     end
@@ -47,8 +86,10 @@ loop do
 
   pending = sessions.keys
   loop do
-    pending.delete_if { |h| !sessions[h].process(0.1, &condition) }
+    pending.delete_if { |h| !sessions[h][:ssh].process(0.1, &condition) }
     break if pending.empty?
   end
-
 end
+
+sessions.each { |host, config| config[:stdout].close; config[:stderr].close }
+
