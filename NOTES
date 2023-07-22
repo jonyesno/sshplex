@@ -1,0 +1,4 @@
+* https://stackoverflow.com/questions/3386233/how-to-get-exit-status-with-rubys-netssh-library/3386375#3386375
+* https://stackoverflow.com/questions/3695138/how-can-i-pipe-data-to-a-process-started-via-netssh-on-stdin
+* https://github.com/net-ssh/net-ssh/blob/0d7e363a3d75a46aa0ab0d48d0f5b6e43f45a7fa/lib/net/ssh/connection/session.rb#L379-L411
+* https://github.com/inuits/ensible/blob/1129d5bc7bf90fb2b29dbe37e9d105c1889243bc/lib/puppet/util/network_device/transport/ssh.rb#L56-L62
