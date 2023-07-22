@@ -26,70 +26,92 @@ padding = hosts.map(&:length).max + 2
 path = "#{ENV['HOME']}/tmp/plex"
 FileUtils.mkdir_p(path)
 
-sessions = hosts.map { |h|
-  STDERR.puts "[setup] #{h}"
-  [ h, {
-         :ssh    => Net::SSH.start(h, options[:user]),
-         :stdout => File.open("#{path}/#{h}.stdout", "w+"),
-         :stderr => File.open("#{path}/#{h}.stderr", "w+"),
-       }
-  ]
-}.to_h
+Plex = Struct.new('Plex', :hostname, :ssh, :out, :channel, :at_prompt)
+plex = hosts.map { |h| Plex.new(h,
+                                Net::SSH.start(h, options[:user], verbose: :info),
+                                File.open("#{path}/#{h}.out", "w+"),
+                                nil,
+                                false) }
 
-loop do
-  cmd = Readline.readline("$ ")
-  exit if cmd.nil?
-  next if cmd.empty?
+plex.each do |p|
+  p.channel = p.ssh.open_channel do |channel|
+    STDERR.puts "[shell] established #{p.hostname}"
 
-  sessions.each do |hostname, config|
 
-    STDERR.puts "[exec] #{hostname}"
+    channel.request_pty do |ch, success|
+      raise RuntimeError, "pty failed" unless success
+    end
 
-    prefix = "[#{hostname}]".ljust(padding)
-    config[:stdout].puts "# command: #{cmd}"
-    config[:stderr].puts "# command: #{cmd}"
+    channel.send_channel_request("shell") do |ch, success|
+      raise RuntimeError, "shell failed" unless success
 
-    config[:ssh].open_channel do |channel|
-      channel.exec(cmd) do |ch, success|
-        raise RuntimeError, "exec #{hostname} #{cmd} failed" unless success
-
-        ch.on_data do |ch, data|
-          config[:stdout].puts data
-          config[:stdout].flush
+      ch.on_data do |ch, data|
+        # STDERR.puts "  on_data"
+        lines = data.split(/\r\n/)
+        p.out.puts data
+        p.out.flush
+        if lines.last.match(/GREPME/)
+          plex.find { |pp| pp.hostname == p.hostname }.at_prompt = true
         end
+      end
 
-        ch.on_extended_data do |ch, type, data|
-          config[:stderr].puts data if type == 1
-          config[:stderr].flush
-        end
+      ch.on_extended_data do |ch, type, data|
+        # STDERR.puts "  on_extended_data"
+        p.out.puts data if type == 1
+        p.out.flush
+      end
 
-        ch.on_request("exit-status") do |ch, data|
-          code = data.read_long
-          config[:stdout].puts "# exit: #{code}"
-          config[:stderr].puts "# exit: #{code}"
-          config[:stdout].flush
-          config[:stderr].flush
-        end
+      ch.on_request("exit-status") do |ch, data|
+        # STDERR.puts "  exit-status"
+        code = data.read_long
+        p.out.puts "# exit: #{code}"
+        p.out.flush
+      end
 
-        ch.on_request("exit-signal") do |ch, data|
-          signal = data.read_long
-          config[:stdout].puts "# signal: #{signal}"
-          config[:stderr].puts "# signal: #{signal}"
-          config[:stdout].flush
-          config[:stderr].flush
-        end
+      ch.on_request("exit-signal") do |ch, data|
+        # STDERR.puts "  exit-code"
+        signal = data.read_long
+        p.out.puts "# signal: #{signal}"
+        p.out.flush
       end
     end
   end
-
-  condition = Proc.new { |s| s.busy? }
-
-  pending = sessions.keys
-  loop do
-    pending.delete_if { |h| !sessions[h][:ssh].process(0.1, &condition) }
-    break if pending.empty?
-  end
 end
 
-sessions.each { |host, config| config[:stdout].close; config[:stderr].close }
+
+STDERR.puts "[loop]"
+
+loop do
+  STDERR.puts "[waiting for prompt]"
+  pending = plex.map(&:hostname)
+  loop do
+    STDERR.puts "[loop] #{pending.length} remaining"
+    next_pending = []
+    pending.each do |h|
+      p = plex.find { |p| p.hostname == h }
+      p.ssh.process(0.5)
+      if p.at_prompt
+        STDERR.puts "[loop] at prompt"
+        # p.ssh.process(0.5) # one pending?
+      else
+        next_pending << h unless p.at_prompt
+      end
+    end
+    pending = next_pending
+    break if pending.empty?
+  end
+
+  cmd = Readline.readline("%% ")
+  last if cmd.nil?
+  next if cmd.empty?
+
+  plex.each do |p|
+    p.at_prompt = false
+    p.out.puts "# command: #{cmd}"
+    p.channel.send_data(cmd + "\n")
+  end
+
+end
+
+plex.each { |p| p.out.close }
 
