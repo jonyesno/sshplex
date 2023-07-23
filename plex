@@ -22,100 +22,140 @@ op.parse!
 
 hosts = ARGV
 raise OptionParser::MissingArgument, "\n#{op.banner}" if hosts.empty?
-padding = hosts.map(&:length).max + 2
 
 path = "#{ENV['HOME']}/tmp/plex"
 FileUtils.mkdir_p(path)
 
-Plex = Struct.new('Plex', :hostname, :ssh, :out, :channel, :at_prompt)
-plex = hosts.map { |h| Plex.new(h,
-                                Net::SSH.start(h, options[:user], verbose: :warn),
-                                STDOUT, # File.open("#{path}/#{h}.out", "w+"),
-                                nil,
-                                false) }
+class Plex
+  attr_reader :at_prompt, :channel, :hostname, :out, :ssh
 
-plex.each do |p|
-  p.channel = p.ssh.open_channel do |channel|
-    STDERR.puts "[shell] established #{p.hostname}"
+  # https://stackoverflow.com/a/29497680
+  STRIP_ANSI = Regexp.new('[\u001b\u009b][\[();?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><]')
 
+  def initialize(hostname, **kwargs)
+    @hostname = hostname
+    @out = kwargs[:out] || STDOUT
+    @user = kwargs[:user]
 
-    channel.request_pty do |ch, success|
-      raise RuntimeError, "pty failed" unless success
-    end
+    @at_prompt = false
+    @prompt = Regexp.new('(\r\n% | \d+ \$ )$')
 
-    channel.send_channel_request("shell") do |ch, success|
-      raise RuntimeError, "shell failed" unless success
+    @buffer = []
+    @eof = false
 
-      ch.on_data do |ch, data|
-        # STDERR.puts "  on_data"
-        lines = data.split(/\r\n/)
-        p.out.puts data
-        p.out.flush
-        if lines.last.match(/plex% /)
-          plex.find { |pp| pp.hostname == p.hostname }.at_prompt = true
+    self.open
+  end
+
+  def open
+    @ssh = Net::SSH.start(@hostname, @user, verbose: :warn)
+    @channel = @ssh.open_channel do |channel|
+      STDERR.puts "[plex] established channel to #{@hostname}"
+
+      channel.request_pty do |ch, success|
+        raise RuntimeError, "pty failed" unless success
+      end
+
+      channel.send_channel_request("shell") do |ch, success|
+        raise RuntimeError, "shell failed" unless success
+
+        ch.on_data do |ch, data|
+          # STDERR.puts "  on_data"
+          @buffer << data
         end
-      end
 
-      ch.on_extended_data do |ch, type, data|
-        # STDERR.puts "  on_extended_data"
-        p.out.puts data if type == 1
-        p.out.flush
-      end
+        ch.on_extended_data do |ch, type, data|
+          # STDERR.puts "  on_extended_data"
+          @buffer << data
+        end
 
-      ch.on_request("exit-status") do |ch, data|
-        # STDERR.puts "  exit-status"
-        code = data.read_long
-        p.out.puts "# exit: #{code}"
-        p.out.flush
-      end
+        ch.on_request("exit-status") do |ch, data|
+          # STDERR.puts "  exit-status"
+          code = data.read_long
+          @out.puts "# exit: #{code}"
+          @out.flush
+          @eof = true
+        end
 
-      ch.on_request("exit-signal") do |ch, data|
-        # STDERR.puts "  exit-code"
-        signal = data.read_long
-        p.out.puts "# signal: #{signal}"
-        p.out.flush
+        ch.on_request("exit-signal") do |ch, data|
+          # STDERR.puts "  exit-code"
+          signal = data.read_long
+          @out.puts "# signal: #{signal}"
+          @out.flush
+          @eof = true
+        end
       end
     end
   end
+
+  def process
+    current = @buffer.length
+    @ssh.process(0.1)
+    if @buffer.length > current
+      # STDERR.puts "buffer grew from #{current}"
+
+      clean = @buffer.join.gsub(STRIP_ANSI, '')
+      # STDERR.puts %x[ echo '#{clean}' | hexdump -C ]
+
+      if clean.match(@prompt)
+        @at_prompt = true
+        # @buffer.each { |b| @out.print(b) }
+        @out.print(clean)
+        @out.flush
+        STDERR.puts "[process] flushed"
+
+        @buffer = []
+      end
+    end
+  end
+
+  def send(data)
+    @out.puts "# command: #{data}"
+    @at_prompt = false
+    @channel.send_data(data)
+  end
+
+  def alive?
+    !@eof
+  end
+
 end
 
-plex.each do |p|
-  p.channel.send_data "PS1=${PS1:-}\nplex% "
-end
+plex = hosts.map { |h| Plex.new(h, user: options[:user]) }
+
+# plex.each do |p|
+#   p.send "PS1=${PS1:-}\nplex% "
+# end
 
 STDERR.puts "[loop]"
 
 loop do
   STDERR.puts "[waiting for prompt]"
-  pending = plex.map(&:hostname)
-  loop do
-    STDERR.puts "[loop] #{pending.length} remaining"
-    next_pending = []
-    pending.each do |h|
-      p = plex.find { |p| p.hostname == h }
-      p.ssh.process(0.5)
-      if p.at_prompt
-        STDERR.puts "[loop] at prompt"
-        # p.ssh.process(0.5) # one pending?
-      else
-        next_pending << h unless p.at_prompt
-      end
-    end
-    pending = next_pending
-    break if pending.empty?
+  pending = plex.select(&:alive?)
+
+  if pending.length == 0
+    STDERR.puts "[all done]"
+    exit 0
   end
 
+  while pending.length > 0
+    p = pending.shift
+    p.process
+    if p.at_prompt
+      STDERR.puts "[loop] #{p.hostname} at prompt"
+    else
+      pending.push(p)
+    end
+    # STDERR.puts "[loop] #{pending.map(&:hostname).join(',')}"
+  end
+  STDERR.puts "[loop] all done"
+
   cmd = Readline.readline("%% ")
-  last if cmd.nil?
+  break if cmd.nil?
   next if cmd.empty?
 
   plex.each do |p|
-    p.at_prompt = false
-    p.out.puts "# command: #{cmd}"
-    p.channel.send_data(cmd + "\n")
+    p.send(cmd + "\n")
   end
 
 end
-
-plex.each { |p| p.out.close }
 
