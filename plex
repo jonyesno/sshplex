@@ -1,5 +1,6 @@
 #!/usr/bin/env ruby
 
+require 'etc'
 require 'net/ssh'
 require 'optparse'
 require 'reline'
@@ -9,7 +10,7 @@ options = {}
 op = OptionParser.new do |opts|
   opts.banner  = "usage: plex [ options ] hosts"
 
-  options[:user] = 'zomo'
+  options[:user] = Etc.getlogin
   opts.on("-u", "--user=USER", "remote ssh user") { |o| options[:user] = o }
 
   opts.on("-h", "--help") do
@@ -28,8 +29,8 @@ FileUtils.mkdir_p(path)
 
 Plex = Struct.new('Plex', :hostname, :ssh, :out, :channel, :at_prompt)
 plex = hosts.map { |h| Plex.new(h,
-                                Net::SSH.start(h, options[:user], verbose: :info),
-                                File.open("#{path}/#{h}.out", "w+"),
+                                Net::SSH.start(h, options[:user], verbose: :warn),
+                                STDOUT, # File.open("#{path}/#{h}.out", "w+"),
                                 nil,
                                 false) }
 
@@ -50,7 +51,7 @@ plex.each do |p|
         lines = data.split(/\r\n/)
         p.out.puts data
         p.out.flush
-        if lines.last.match(/GREPME/)
+        if lines.last.match(/plex% /)
           plex.find { |pp| pp.hostname == p.hostname }.at_prompt = true
         end
       end
@@ -78,6 +79,9 @@ plex.each do |p|
   end
 end
 
+plex.each do |p|
+  p.channel.send_data "PS1=${PS1:-}\nplex% "
+end
 
 STDERR.puts "[loop]"
 
