@@ -27,8 +27,9 @@ path = "#{ENV['HOME']}/tmp/plex"
 FileUtils.mkdir_p(path)
 
 class Plex
-  attr_reader :at_prompt, :channel, :hostname, :out, :ssh
+  attr_reader :channel, :hostname, :out, :ssh
 
+  # prompt detection is hard when it contains ANSI colour chaos
   # https://stackoverflow.com/a/29497680
   STRIP_ANSI = Regexp.new('[\u001b\u009b][\[();?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><]')
 
@@ -59,17 +60,14 @@ class Plex
         raise RuntimeError, "shell failed" unless success
 
         ch.on_data do |ch, data|
-          # STDERR.puts "  on_data"
           @buffer << data
         end
 
         ch.on_extended_data do |ch, type, data|
-          # STDERR.puts "  on_extended_data"
           @buffer << data
         end
 
         ch.on_request("exit-status") do |ch, data|
-          # STDERR.puts "  exit-status"
           code = data.read_long
           @out.puts "# exit: #{code}"
           @out.flush
@@ -77,7 +75,6 @@ class Plex
         end
 
         ch.on_request("exit-signal") do |ch, data|
-          # STDERR.puts "  exit-code"
           signal = data.read_long
           @out.puts "# signal: #{signal}"
           @out.flush
@@ -91,17 +88,13 @@ class Plex
     current = @buffer.length
     @ssh.process(0.1)
     if @buffer.length > current
-      # STDERR.puts "buffer grew from #{current}"
 
       clean = @buffer.join.gsub(STRIP_ANSI, '')
-      # STDERR.puts %x[ echo '#{clean}' | hexdump -C ]
 
       if clean.match(@prompt)
         @at_prompt = true
-        # @buffer.each { |b| @out.print(b) }
         @out.print(clean)
         @out.flush
-        STDERR.puts "[process] flushed"
 
         @buffer = []
       end
@@ -118,18 +111,17 @@ class Plex
     !@eof
   end
 
+  def at_prompt?
+    @at_prompt
+  end
+
 end
 
 plex = hosts.map { |h| Plex.new(h, user: options[:user]) }
 
-# plex.each do |p|
-#   p.send "PS1=${PS1:-}\nplex% "
-# end
-
 STDERR.puts "[loop]"
 
 loop do
-  STDERR.puts "[waiting for prompt]"
   pending = plex.select(&:alive?)
 
   if pending.length == 0
@@ -140,22 +132,15 @@ loop do
   while pending.length > 0
     p = pending.shift
     p.process
-    if p.at_prompt
-      STDERR.puts "[loop] #{p.hostname} at prompt"
-    else
-      pending.push(p)
-    end
-    # STDERR.puts "[loop] #{pending.map(&:hostname).join(',')}"
+    pending.push(p) unless p.at_prompt?
   end
-  STDERR.puts "[loop] all done"
 
-  cmd = Readline.readline("%% ")
+  cmd = Readline.readline("plex% ")
   break if cmd.nil?
   next if cmd.empty?
 
   plex.each do |p|
     p.send(cmd + "\n")
   end
-
 end
 
