@@ -29,17 +29,18 @@ FileUtils.mkdir_p(path)
 class Plex
   attr_reader :channel, :hostname, :out, :ssh
 
-  # prompt detection is hard when it contains ANSI colour chaos
   # https://stackoverflow.com/a/29497680
-  STRIP_ANSI = Regexp.new('[\u001b\u009b][\[();?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><]')
+  ANSI_ESCAPE_CODES = Regexp.new('[\u001b\u009b][\[();?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><]')
 
   def initialize(hostname, **kwargs)
     @hostname = hostname
     @out = kwargs[:out] || STDOUT
     @user = kwargs[:user]
 
+    @out.sync = true # internally line buffered here
+
     @at_prompt = false
-    @prompt = Regexp.new('(\r\n% | \d+ \$ )$')
+    @prompt = Regexp.new('(^% | \d+ \$ )$')
 
     @buffer = []
     @eof = false
@@ -70,14 +71,12 @@ class Plex
         ch.on_request("exit-status") do |ch, data|
           code = data.read_long
           @out.puts "# exit: #{code}"
-          @out.flush
           @eof = true
         end
 
         ch.on_request("exit-signal") do |ch, data|
           signal = data.read_long
           @out.puts "# signal: #{signal}"
-          @out.flush
           @eof = true
         end
       end
@@ -85,20 +84,36 @@ class Plex
   end
 
   def process
-    current = @buffer.length
     @ssh.process(0.1)
-    if @buffer.length > current
+    unless @buffer.empty?
 
-      clean = @buffer.join.gsub(STRIP_ANSI, '')
+      # join buffer lines, strip of ANSI chaos
+      clean = @buffer.join.gsub(ANSI_ESCAPE_CODES, '').gsub("\r", "")
 
-      if clean.match(@prompt)
+      # emit all the \n terminated lines, keep the current in-progress line
+      lines = clean.split(/\n/, -1)
+      if lines.empty?
+        raise RuntimeError, "eh"
+      end
+
+      current = lines.pop
+      @out.puts(lines.join("\n"))
+
+      if current.empty?
+        @buffer = []
+      else
+        @buffer = [ current ]
+      end
+
+      if current.match(@prompt)
+        # STDERR.puts "[process] at prompt"
         @at_prompt = true
-        @out.print(clean)
-        @out.flush
+        @out.print(current)
 
         @buffer = []
       end
     end
+
   end
 
   def send(data)
@@ -117,7 +132,9 @@ class Plex
 
 end
 
-plex = hosts.map { |h| Plex.new(h, user: options[:user]) }
+plex = hosts.map { |h| Plex.new(h,
+                                user: options[:user],
+                               ) } # out:  File.open("#{ENV['HOME']}/tmp/plex/#{h}.out", "w+")) }
 
 STDERR.puts "[loop]"
 
