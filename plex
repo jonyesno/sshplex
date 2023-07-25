@@ -13,6 +13,9 @@ op = OptionParser.new do |opts|
   options[:user] = Etc.getlogin
   opts.on("-u", "--user=USER", "remote ssh user") { |o| options[:user] = o }
 
+  options[:mode] = :exec
+  opts.on("-m", "--mode=(exec|shell)", [ :exec, :shell ]) { |o| options[:mode] = o }
+
   opts.on("-h", "--help") do
     puts opts
     exit
@@ -27,7 +30,7 @@ path = "#{ENV['HOME']}/tmp/plex"
 FileUtils.mkdir_p(path)
 
 class Plex
-  attr_reader :channel, :hostname, :out, :ssh
+  attr_reader :shell, :hostname, :out, :ssh
 
   # https://stackoverflow.com/a/29497680
   ANSI_ESCAPE_CODES = Regexp.new('[\u001b\u009b][\[();?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><]')
@@ -37,21 +40,23 @@ class Plex
     @out = kwargs[:out] || STDOUT
     @user = kwargs[:user]
 
-    @out.sync = true # internally line buffered here
-
     @at_prompt = false
     @prompt = Regexp.new('(^% | \d+ \$ )$')
 
     @buffer = []
-    @eof = false
+    @ssh_eof = false
+    @exec_inflight = false
 
     self.open
   end
 
   def open
     @ssh = Net::SSH.start(@hostname, @user, verbose: :warn)
-    @channel = @ssh.open_channel do |channel|
-      STDERR.puts "[plex] established channel to #{@hostname}"
+  end
+
+  def shell
+    @shell = @ssh.open_channel do |channel|
+      STDERR.puts "[plex] established shell channel to #{@hostname}"
 
       channel.request_pty do |ch, success|
         raise RuntimeError, "pty failed" unless success
@@ -70,14 +75,45 @@ class Plex
 
         ch.on_request("exit-status") do |ch, data|
           code = data.read_long
+          @buffer << "# exit: #{code}\n"
+          @ssh_eof = true
+        end
+
+        ch.on_request("exit-signal") do |ch, data|
+          signal = data.read_long
+          @buffer << "# signal: #{signal}\n"
+          @ssh_eof = true
+        end
+      end
+    end
+  end
+
+  def exec(cmd)
+    @exec_pending = true
+    @exec = @ssh.open_channel do |channel|
+      STDERR.puts "[plex] established exec channel to #{@hostname}"
+
+      channel.exec(cmd) do |ch, success|
+        raise RuntimeError, "exec failed" unless success
+
+        ch.on_data do |ch, data|
+          @buffer << data
+        end
+
+        ch.on_extended_data do |ch, type, data|
+          @buffer << data
+        end
+
+        ch.on_request("exit-status") do |ch, data|
+          code = data.read_long
           @out.puts "# exit: #{code}"
-          @eof = true
+          @exec_pending = false
         end
 
         ch.on_request("exit-signal") do |ch, data|
           signal = data.read_long
           @out.puts "# signal: #{signal}"
-          @eof = true
+          @exec_pending = false
         end
       end
     end
@@ -97,7 +133,10 @@ class Plex
       end
 
       current = lines.pop
-      @out.puts(lines.join("\n"))
+      emit = lines.join("\n")
+      unless emit.empty?
+        @out.puts emit
+      end
 
       if current.empty?
         @buffer = []
@@ -106,50 +145,93 @@ class Plex
       end
 
       if current.match(@prompt)
-        # STDERR.puts "[process] at prompt"
         @at_prompt = true
-        @out.print(current)
+        @out.puts current.gsub(@prompt, '')
 
         @buffer = []
       end
     end
-
   end
 
-  def send(data)
-    @out.puts "# command: #{data}"
-    @at_prompt = false
-    @channel.send_data(data)
-  end
-
-  def alive?
-    !@eof
+  def send(data, mode)
+    case mode
+    when :shell
+      @at_prompt = false
+      @buffer = [ 'plex% ' ] # add synthetic prompt to output
+      @shell.send_data(data + "\n")
+    when :exec
+      self.exec(data)
+    end
   end
 
   def at_prompt?
     @at_prompt
   end
 
+  def eof?
+    @ssh_eof
+  end
+
+  def exec?
+    @exec_pending
+  end
+
 end
+
+class Outputter
+  def initialize(prefix = "", io = STDOUT)
+    @io = io
+    @prefix = prefix
+    @io.sync = true
+  end
+
+  def puts(data)
+    @io.puts(data.split("\n").map { |l| "#{@prefix} #{l}" }.join("\n"))
+  end
+
+  def print(data)
+    @io.print(data.split("\n").map { |l| "#{@prefix} #{l}" }.join("\n"))
+  end
+end
+
 
 plex = hosts.map { |h| Plex.new(h,
                                 user: options[:user],
-                               ) } # out:  File.open("#{ENV['HOME']}/tmp/plex/#{h}.out", "w+")) }
+                                out: Outputter.new("[#{h}]", STDOUT),
+                               ) }
+mode = options[:mode]
+
+case mode
+when :shell
+  plex.map { |p| p.shell }
+end
 
 STDERR.puts "[loop]"
 
 loop do
-  pending = plex.select(&:alive?)
+  pending = []
 
-  if pending.length == 0
-    STDERR.puts "[all done]"
-    exit 0
+  case mode
+  when :shell
+    pending = plex.select { |p| !p.eof? }
+    if pending.length == 0
+      STDERR.puts "[all done]"
+      exit 0
+    end
+  when :exec
+    pending = plex.dup
   end
 
   while pending.length > 0
     p = pending.shift
     p.process
-    pending.push(p) unless p.at_prompt?
+
+    # FIXME generalise
+    next if p.eof?
+    next if p.at_prompt?
+    next if mode == :exec && !p.exec?
+
+    pending.push(p)
   end
 
   cmd = Readline.readline("plex% ")
@@ -157,7 +239,7 @@ loop do
   next if cmd.empty?
 
   plex.each do |p|
-    p.send(cmd + "\n")
+    p.send(cmd, mode)
   end
 end
 
