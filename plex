@@ -53,7 +53,7 @@ class Plex
   end
 
   def open
-    @ssh = Net::SSH.start(@hostname, @user, verbose: :debug)
+    @ssh = Net::SSH.start(@hostname, @user, verbose: :error)
     case @mode
     when :exec
       @idle = true  # exec channel is opened every time
@@ -128,7 +128,6 @@ class Plex
   end
 
   def process
-    STDERR.puts "[process] #{@hostname}"
     @ssh.process(0.1)
     unless @buffer.empty?
 
@@ -151,7 +150,6 @@ class Plex
       end
 
       if current.match(@prompt)
-        STDERR.puts "[process] prompt"
         @idle = true
         @out.puts current.gsub(@prompt, '')
 
@@ -160,10 +158,10 @@ class Plex
     end
   end
 
-  def send(data, mode)
+  def send(data)
     @idle = false
 
-    case mode
+    case @mode
     when :shell
       @buffer = [ 'plex% ' ] # add synthetic prompt to output
       @shell.send_data(data + "\n")
@@ -231,7 +229,7 @@ loop do
   next if cmd.empty?
 
   plex.each do |p|
-    p.send(cmd, mode)
+    p.send(cmd)
   end
 end
 
