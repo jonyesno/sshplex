@@ -37,21 +37,30 @@ class Plex
 
   def initialize(hostname, **kwargs)
     @hostname = hostname
-    @out = kwargs[:out] || STDOUT
-    @user = kwargs[:user]
 
-    @at_prompt = false
-    @prompt = Regexp.new('(^% | \d+ \$ )$')
+    @out =  kwargs[:out]  || STDOUT
+    @user = kwargs[:user] || Etc.getlogin
+    @mode = kwargs[:mode] || :exec
 
     @buffer = []
-    @ssh_eof = false
-    @exec_inflight = false
+
+    @idle = false
+    @eof  = false
+
+    @prompt = Regexp.new('(^% | \d+ \$ )$')
 
     self.open
   end
 
   def open
-    @ssh = Net::SSH.start(@hostname, @user, verbose: :warn)
+    @ssh = Net::SSH.start(@hostname, @user, verbose: :debug)
+    case @mode
+    when :exec
+      @idle = true  # exec channel is opened every time
+    when :shell
+      @idle = false # process shell channel setup before accepting commands
+      self.shell
+    end
   end
 
   def shell
@@ -76,20 +85,19 @@ class Plex
         ch.on_request("exit-status") do |ch, data|
           code = data.read_long
           @buffer << "# exit: #{code}\n"
-          @ssh_eof = true
+          @eof = true
         end
 
         ch.on_request("exit-signal") do |ch, data|
           signal = data.read_long
           @buffer << "# signal: #{signal}\n"
-          @ssh_eof = true
+          @eof = true
         end
       end
     end
   end
 
   def exec(cmd)
-    @exec_pending = true
     @exec = @ssh.open_channel do |channel|
       STDERR.puts "[plex] established exec channel to #{@hostname}"
 
@@ -107,19 +115,20 @@ class Plex
         ch.on_request("exit-status") do |ch, data|
           code = data.read_long
           @out.puts "# exit: #{code}"
-          @exec_pending = false
+          @idle = true
         end
 
         ch.on_request("exit-signal") do |ch, data|
           signal = data.read_long
           @out.puts "# signal: #{signal}"
-          @exec_pending = false
+          @idle = true
         end
       end
     end
   end
 
   def process
+    STDERR.puts "[process] #{@hostname}"
     @ssh.process(0.1)
     unless @buffer.empty?
 
@@ -127,13 +136,10 @@ class Plex
       clean = @buffer.join.gsub(ANSI_ESCAPE_CODES, '').gsub("\r", "")
 
       # emit all the \n terminated lines, keep the current in-progress line
-      lines = clean.split(/\n/, -1)
-      if lines.empty?
-        raise RuntimeError, "eh"
-      end
-
+      lines   = clean.split(/\n/, -1)
       current = lines.pop
-      emit = lines.join("\n")
+      emit    = lines.join("\n")
+
       unless emit.empty?
         @out.puts emit
       end
@@ -145,7 +151,8 @@ class Plex
       end
 
       if current.match(@prompt)
-        @at_prompt = true
+        STDERR.puts "[process] prompt"
+        @idle = true
         @out.puts current.gsub(@prompt, '')
 
         @buffer = []
@@ -154,9 +161,10 @@ class Plex
   end
 
   def send(data, mode)
+    @idle = false
+
     case mode
     when :shell
-      @at_prompt = false
       @buffer = [ 'plex% ' ] # add synthetic prompt to output
       @shell.send_data(data + "\n")
     when :exec
@@ -164,18 +172,13 @@ class Plex
     end
   end
 
-  def at_prompt?
-    @at_prompt
+  def idle?
+    @idle
   end
 
   def eof?
-    @ssh_eof
+    @eof
   end
-
-  def exec?
-    @exec_pending
-  end
-
 end
 
 class Outputter
@@ -197,41 +200,30 @@ end
 
 plex = hosts.map { |h| Plex.new(h,
                                 user: options[:user],
+                                mode: options[:mode],
                                 out: Outputter.new("[#{h}]", STDOUT),
                                ) }
 mode = options[:mode]
 
-case mode
-when :shell
-  plex.map { |p| p.shell }
-end
-
 STDERR.puts "[loop]"
 
 loop do
-  pending = []
 
-  case mode
-  when :shell
-    pending = plex.select { |p| !p.eof? }
-    if pending.length == 0
-      STDERR.puts "[all done]"
-      exit 0
-    end
-  when :exec
-    pending = plex.dup
-  end
+  pending = plex.select { |p| !p.eof? }
 
   while pending.length > 0
     p = pending.shift
     p.process
 
-    # FIXME generalise
     next if p.eof?
-    next if p.at_prompt?
-    next if mode == :exec && !p.exec?
+    next if p.idle?
 
     pending.push(p)
+  end
+
+  if plex.select { |p| !p.eof? }.empty?
+    STDERR.puts "[all done]"
+    exit 0
   end
 
   cmd = Readline.readline("plex% ")
