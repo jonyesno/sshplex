@@ -9,7 +9,7 @@ Readline = Reline
 
 options = {}
 op = OptionParser.new do |opts|
-  opts.banner  = "usage: plex [ options ] hosts"
+  opts.banner  = "usage: sshplex [ options ] hosts"
 
   options[:user] = nil
   opts.on("-u", "--user=USER", "remote ssh user") { |o| options[:user] = o }
@@ -165,7 +165,7 @@ class Plex
 
     case @mode
     when :shell
-      @buffer = [ 'plex% ' ] # add synthetic prompt to output
+      @buffer = [ 'sshplex% ' ]         # add synthetic prompt to output
       @shell.send_data(data + "\n")
     when :exec
       @buffer = [ "# exec: #{data}\n" ] # record command in output
@@ -227,7 +227,7 @@ loop do
     exit 0
   end
 
-  cmd = Readline.readline("plex% ")
+  cmd = Readline.readline("sshplex% ")
   break if cmd.nil?
   next if cmd.empty?
 
