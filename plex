@@ -6,17 +6,22 @@ require 'optparse'
 require 'reline'
 
 Readline = Reline
+
 options = {}
 op = OptionParser.new do |opts|
   opts.banner  = "usage: plex [ options ] hosts"
 
-  options[:user] = Etc.getlogin
+  options[:user] = nil
   opts.on("-u", "--user=USER", "remote ssh user") { |o| options[:user] = o }
 
   options[:mode] = :exec
   opts.on("-m", "--mode=(exec|shell)", [ :exec, :shell ]) { |o| options[:mode] = o }
 
+  opts.on("-e", "--exec",  "same as --mode exec")  { options[:mode] = :exec }
+  opts.on("-s", "--shell", "same as --mode shell") { options[:mode] = :shell }
+
   opts.on("-h", "--help") do
+
     puts opts
     exit
   end
@@ -26,11 +31,8 @@ op.parse!
 hosts = ARGV
 raise OptionParser::MissingArgument, "\n#{op.banner}" if hosts.empty?
 
-path = "#{ENV['HOME']}/tmp/plex"
-FileUtils.mkdir_p(path)
-
 class Plex
-  attr_reader :shell, :hostname, :out, :ssh
+  attr_reader :hostname
 
   # https://stackoverflow.com/a/29497680
   ANSI_ESCAPE_CODES = Regexp.new('[\u001b\u009b][\[();?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><]')
@@ -39,7 +41,7 @@ class Plex
     @hostname = hostname
 
     @out =  kwargs[:out]  || STDOUT
-    @user = kwargs[:user] || Etc.getlogin
+    @user = kwargs[:user] # when nil ~/.ssh/config is used
     @mode = kwargs[:mode] || :exec
 
     @buffer = []
@@ -47,7 +49,7 @@ class Plex
     @idle = false
     @eof  = false
 
-    @prompt = Regexp.new('(^% | \d+ \$ )$')
+    @prompt = Regexp.new('(^% | \d+ \$ )$') # ymmv
 
     self.open
   end
@@ -56,7 +58,7 @@ class Plex
     @ssh = Net::SSH.start(@hostname, @user, verbose: :error)
     case @mode
     when :exec
-      @idle = true  # exec channel is opened every time
+      @idle = true  # exec channel is opened every time, so consider it idle at start
     when :shell
       @idle = false # process shell channel setup before accepting commands
       self.shell
@@ -65,7 +67,7 @@ class Plex
 
   def shell
     @shell = @ssh.open_channel do |channel|
-      STDERR.puts "[plex] established shell channel to #{@hostname}"
+      # STDERR.puts "[plex] established shell channel to #{@hostname}"
 
       channel.request_pty do |ch, success|
         raise RuntimeError, "pty failed" unless success
@@ -99,7 +101,7 @@ class Plex
 
   def exec(cmd)
     @exec = @ssh.open_channel do |channel|
-      STDERR.puts "[plex] established exec channel to #{@hostname}"
+      # STDERR.puts "[plex] established exec channel to #{@hostname}"
 
       channel.exec(cmd) do |ch, success|
         raise RuntimeError, "exec failed" unless success
@@ -114,13 +116,13 @@ class Plex
 
         ch.on_request("exit-status") do |ch, data|
           code = data.read_long
-          @out.puts "# exit: #{code}"
+          @buffer << "# exit: #{code}\n"
           @idle = true
         end
 
         ch.on_request("exit-signal") do |ch, data|
           signal = data.read_long
-          @out.puts "# signal: #{signal}"
+          @buffer << "# signal: #{signal}\n"
           @idle = true
         end
       end
@@ -131,7 +133,7 @@ class Plex
     @ssh.process(0.1)
     unless @buffer.empty?
 
-      # join buffer lines, strip of ANSI chaos
+      # join buffer lines, strip out ANSI chaos
       clean = @buffer.join.gsub(ANSI_ESCAPE_CODES, '').gsub("\r", "")
 
       # emit all the \n terminated lines, keep the current in-progress line
@@ -144,7 +146,7 @@ class Plex
       end
 
       if current.empty?
-        @buffer = []
+        @buffer = [] # avoid a buffer of just ""
       else
         @buffer = [ current ]
       end
@@ -166,6 +168,7 @@ class Plex
       @buffer = [ 'plex% ' ] # add synthetic prompt to output
       @shell.send_data(data + "\n")
     when :exec
+      @buffer = [ "# exec: #{data}\n" ] # record command in output
       self.exec(data)
     end
   end
@@ -203,7 +206,7 @@ plex = hosts.map { |h| Plex.new(h,
                                ) }
 mode = options[:mode]
 
-STDERR.puts "[loop]"
+# STDERR.puts "[loop]"
 
 loop do
 
