@@ -11,6 +11,9 @@ options = {}
 op = OptionParser.new do |opts|
   opts.banner  = "usage: sshplex [ options ] hosts"
 
+  options[:forward_agent] = false
+  opts.on("-A", "--forward-agent") { options[:forward_agent] = true }
+
   options[:user] = nil
   opts.on("-u", "--user=USER", "remote ssh user") { |o| options[:user] = o }
 
@@ -40,9 +43,10 @@ class Plex
   def initialize(hostname, **kwargs)
     @hostname = hostname
 
-    @out =  kwargs[:out]  || STDOUT
-    @user = kwargs[:user] # when nil ~/.ssh/config is used
-    @mode = kwargs[:mode] || :exec
+    @agent = kwargs[:agent] || false
+    @mode  = kwargs[:mode]  || :exec
+    @out   = kwargs[:out]   || STDOUT
+    @user  = kwargs[:user]  # when nil ~/.ssh/config is used
 
     @buffer = []
 
@@ -55,7 +59,10 @@ class Plex
   end
 
   def open
-    @ssh = Net::SSH.start(@hostname, @user, verbose: :error)
+    @ssh = Net::SSH.start(@hostname,
+                          @user,
+                          verbose: :error,
+                          forward_agent: @agent)
     case @mode
     when :exec
       @idle = true  # exec channel is opened every time, so consider it idle at start
@@ -200,9 +207,10 @@ end
 
 
 plex = hosts.map { |h| Plex.new(h,
-                                user: options[:user],
+                                agent: options[:forward_agent],
                                 mode: options[:mode],
                                 out: Outputter.new("[#{h}]", STDOUT),
+                                user: options[:user],
                                ) }
 mode = options[:mode]
 
