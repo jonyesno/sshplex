@@ -23,8 +23,10 @@ op = OptionParser.new do |opts|
   opts.on("-e", "--exec",  "same as --mode exec")  { options[:mode] = :exec }
   opts.on("-s", "--shell", "same as --mode shell") { options[:mode] = :shell }
 
-  opts.on("-h", "--help") do
+  options[:output] = :same
+  opts.on("-t", "--tmux", "use tmux split pane for output") { options[:output] = :tmux }
 
+  opts.on("-h", "--help") do
     puts opts
     exit
   end
@@ -205,19 +207,41 @@ class Outputter
   end
 end
 
+case options[:output]
+when :same
+  out = -> (h) { Outputter.new(h, STDOUT) }
+when :tmux
+  raise RuntimeError, "no tmux session" unless ENV['TMUX']
+
+  %x[ tmux select-pane -T sshplex ]
+  tmux_window = %x[ tmux display-message -p '#W' ].chomp
+  tmux_panes  = %x[ tmux list-panes -t #{tmux_window} -F '#T #P' ]
+    .split(/\n/)
+    .map(&:split)
+    .to_h
+
+  if tmux_panes.keys.include?("log")
+    STDERR.puts "old log pane found, killing"
+    %x[ tmux kill-pane -t #{tmux_panes['log']} ]
+  end
+
+  STDERR.puts "splitting new log pane"
+  pipe = IO.popen("tmux split-pane -v -l 80% -b -I", "w+")
+  %x[ tmux select-pane -T log ]
+  %x[ tmux select-pane -l ]
+
+  out = -> (h) { Outputter.new(h, pipe) }
+end
 
 plex = hosts.map { |h| Plex.new(h,
                                 agent: options[:forward_agent],
-                                mode: options[:mode],
-                                out: Outputter.new("[#{h}]", STDOUT),
-                                user: options[:user],
+                                mode:  options[:mode],
+                                out:   out.call(h),
+                                user:  options[:user],
                                ) }
 mode = options[:mode]
 
-# STDERR.puts "[loop]"
-
 loop do
-
   pending = plex.select { |p| !p.eof? }
 
   while pending.length > 0
@@ -243,4 +267,3 @@ loop do
     p.send(cmd)
   end
 end
-
