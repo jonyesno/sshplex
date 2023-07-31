@@ -16,19 +16,24 @@ op = OptionParser.new do |opts|
   opts.on("-A", "--forward-agent") { options[:forward_agent] = true }
 
   options[:user] = nil
-  opts.on("-u", "--user=USER", "remote ssh user") { |o| options[:user] = o }
+  opts.on("-u", "--user=USER",
+          "remote ssh user") { |o| options[:user] = o }
 
   options[:mode] = :exec
-  opts.on("-m", "--mode=(exec|shell)", [ :exec, :shell ]) { |o| options[:mode] = o }
+  opts.on("-m", "--mode=(exec|shell)",
+          [ :exec, :shell ]) { |o| options[:mode] = o }
   opts.on("-e", "--exec",  "same as --mode exec")  { options[:mode] = :exec }
   opts.on("-s", "--shell", "same as --mode shell") { options[:mode] = :shell }
 
   options[:output] = :same
-  opts.on("-t", "--tmux", "use tmux split pane for output") { options[:output] = :tmux }
+  opts.on("-t", "--tmux",
+          "use tmux split pane for output") { options[:output] = :tmux }
 
   options[:loglevel] = :error
-  opts.on("-l", "--log-level=LEVEL", [ :debug, :info, :warn, :error, :fatal ]) { |o| options[:loglevel ] = o }
-  opts.on("-v", "--verbose", "same as --log-level debug") { options[:loglevel] = :debug }
+  opts.on("-l", "--log-level=LEVEL",
+          [ :debug, :info, :warn, :error, :fatal ]) { |o| options[:loglevel ] = o }
+  opts.on("-v", "--verbose",
+          "same as --log-level debug") { options[:loglevel] = :debug }
 
   opts.on("-h", "--help") do
     puts opts
