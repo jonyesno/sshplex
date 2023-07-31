@@ -1,6 +1,7 @@
 #!/usr/bin/env ruby
 
 require 'etc'
+require 'logger'
 require 'net/ssh'
 require 'optparse'
 require 'reline'
@@ -19,12 +20,15 @@ op = OptionParser.new do |opts|
 
   options[:mode] = :exec
   opts.on("-m", "--mode=(exec|shell)", [ :exec, :shell ]) { |o| options[:mode] = o }
-
   opts.on("-e", "--exec",  "same as --mode exec")  { options[:mode] = :exec }
   opts.on("-s", "--shell", "same as --mode shell") { options[:mode] = :shell }
 
   options[:output] = :same
   opts.on("-t", "--tmux", "use tmux split pane for output") { options[:output] = :tmux }
+
+  options[:loglevel] = :error
+  opts.on("-l", "--log-level=LEVEL", [ :debug, :info, :warn, :error, :fatal ]) { |o| options[:loglevel ] = o }
+  opts.on("-v", "--verbose", "same as --log-level debug") { options[:loglevel] = :debug }
 
   opts.on("-h", "--help") do
     puts opts
@@ -45,10 +49,11 @@ class Plex
   def initialize(hostname, **kwargs)
     @hostname = hostname
 
-    @agent = kwargs[:agent] || false
-    @mode  = kwargs[:mode]  || :exec
-    @out   = kwargs[:out]   || STDOUT
-    @user  = kwargs[:user]  # when nil ~/.ssh/config is used
+    @agent  = kwargs[:agent]  || false
+    @logger = kwargs[:logger] || Logger.new
+    @mode   = kwargs[:mode]   || :exec
+    @out    = kwargs[:out]    || STDOUT
+    @user   = kwargs[:user]   # when nil ~/.ssh/config is used
 
     @buffer = []
 
@@ -63,8 +68,8 @@ class Plex
   def open
     @ssh = Net::SSH.start(@hostname,
                           @user,
-                          verbose: :error,
-                          forward_agent: @agent)
+                          forward_agent: @agent,
+                          logger: @logger)
     case @mode
     when :exec
       @idle = true  # exec channel is opened every time, so consider it idle at start
@@ -76,7 +81,7 @@ class Plex
 
   def shell
     @shell = @ssh.open_channel do |channel|
-      # STDERR.puts "[plex] established shell channel to #{@hostname}"
+      @logger.info("opened shell channel to #{@hostname}")
 
       channel.request_pty do |ch, success|
         raise RuntimeError, "pty failed" unless success
@@ -110,7 +115,7 @@ class Plex
 
   def exec(cmd)
     @exec = @ssh.open_channel do |channel|
-      # STDERR.puts "[plex] established exec channel to #{@hostname}"
+      @logger.info("opened exec channel to #{@hostname}")
 
       channel.exec(cmd) do |ch, success|
         raise RuntimeError, "exec failed" unless success
@@ -207,6 +212,8 @@ class Outputter
   end
 end
 
+logger = Logger.new(STDERR, level: Logger.const_get(options[:loglevel].upcase))
+
 case options[:output]
 when :same
   out = -> (h) { Outputter.new(h, STDOUT) }
@@ -221,11 +228,11 @@ when :tmux
     .to_h
 
   if tmux_panes.keys.include?("log")
-    STDERR.puts "old log pane found, killing"
+    logger.debug("old log pane found, killing")
     %x[ tmux kill-pane -t #{tmux_panes['log']} ]
   end
 
-  STDERR.puts "splitting new log pane"
+  logger.debug("splitting new log pane")
   pipe = IO.popen("tmux split-pane -v -l 80% -b -I", "w+")
   %x[ tmux select-pane -T log ]
   %x[ tmux select-pane -l ]
@@ -234,10 +241,11 @@ when :tmux
 end
 
 plex = hosts.map { |h| Plex.new(h,
-                                agent: options[:forward_agent],
-                                mode:  options[:mode],
-                                out:   out.call(h),
-                                user:  options[:user],
+                                agent:  options[:forward_agent],
+                                logger: logger,
+                                mode:   options[:mode],
+                                out:    out.call(h),
+                                user:   options[:user],
                                ) }
 mode = options[:mode]
 
@@ -255,7 +263,7 @@ loop do
   end
 
   if plex.select { |p| !p.eof? }.empty?
-    STDERR.puts "[all done]"
+    logger.info("all done")
     exit 0
   end
 
