@@ -255,10 +255,21 @@ plex = hosts.map { |h| Plex.new(h,
 mode = options[:mode]
 
 loop do
+
   pending = plex.select { |p| !p.eof? }
+
+  sigint = false
+  Signal.trap("INT") { sigint = true }
 
   while pending.length > 0
     p = pending.shift
+
+    # FIXME this'll repeatedly signal during return to prompt
+    if sigint
+      logger.debug("sending ETX to #{p.hostname}")
+      p.send("\x03")
+    end
+
     p.process
 
     next if p.eof?
@@ -266,6 +277,8 @@ loop do
 
     pending.push(p)
   end
+
+  Signal.trap("INT", "DEFAULT")
 
   if plex.select { |p| !p.eof? }.empty?
     logger.info("all done")
