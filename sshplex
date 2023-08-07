@@ -51,6 +51,8 @@ class Plex
   # https://stackoverflow.com/a/29497680
   ANSI_ESCAPE_CODES = Regexp.new('[\u001b\u009b][\[();?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><]')
 
+  CONNECTION_ERRORS = [ SocketError, Errno::ECONNREFUSED ]
+
   def initialize(hostname, **kwargs)
     @hostname = hostname
 
@@ -76,8 +78,9 @@ class Plex
                             @user,
                             forward_agent: @agent,
                             logger: @logger)
-    rescue SocketError => e
-      @logger.error("can't conect to #{@hostname}: #{e}")
+
+    rescue *CONNECTION_ERRORS => e
+      @logger.error("can't connect to #{@hostname}: #{e}")
       @ssh = nil
     end
 
