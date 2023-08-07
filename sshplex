@@ -122,6 +122,10 @@ class Plex
     @exec = @ssh.open_channel do |channel|
       @logger.info("opened exec channel to #{@hostname}")
 
+      channel.request_pty do |ch, success|
+        raise RuntimeError, "pty failed" unless success
+      end
+
       channel.exec(cmd) do |ch, success|
         raise RuntimeError, "exec failed" unless success
 
@@ -192,6 +196,17 @@ class Plex
     end
   end
 
+  def etx!
+    return if @eof
+
+    case @mode
+    when :shell
+      @shell.send_data("\x03")
+    when :exec
+      @exec.send_data("\x03")
+    end
+  end
+
   def idle?
     @idle
   end
@@ -257,17 +272,10 @@ Readline.vi_editing_mode
 loop do
   pending = plex.select { |p| !p.eof? }
 
-  sigint = false
-  Signal.trap("INT") { sigint = true }
+  Signal.trap("INT") { plex.map { |p| p.etx! } }
 
   while pending.length > 0
     p = pending.shift
-
-    # FIXME this'll repeatedly signal during return to prompt
-    if sigint
-      logger.debug("sending ETX to #{p.hostname}")
-      p.send("\x03")
-    end
 
     p.process
 
