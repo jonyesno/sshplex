@@ -252,10 +252,9 @@ plex = hosts.map { |h| Plex.new(h,
                                 out:    out.call(h),
                                 user:   options[:user],
                                ) }
-mode = options[:mode]
+Readline.vi_editing_mode
 
 loop do
-
   pending = plex.select { |p| !p.eof? }
 
   sigint = false
@@ -285,7 +284,7 @@ loop do
     exit 0
   end
 
-  cmd = Readline.readline("sshplex% ")
+  cmd = Readline.readline("sshplex% ", true)
   break if cmd.nil?
   next if cmd.empty?
 
