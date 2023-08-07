@@ -289,34 +289,39 @@ plex = hosts
 
 Readline.vi_editing_mode
 
-loop do
-  pending = plex.select { |p| !p.eof? }
+begin
+  loop do
+    pending = plex.select { |p| !p.eof? }
 
-  Signal.trap("INT") { plex.map { |p| p.etx! } }
+    Signal.trap("INT") { plex.map { |p| p.etx! } }
 
-  while pending.length > 0
-    p = pending.shift
+    while pending.length > 0
+      p = pending.shift
 
-    p.process
+      p.process
 
-    next if p.eof?
-    next if p.idle?
+      next if p.eof?
+      next if p.idle?
 
-    pending.push(p)
+      pending.push(p)
+    end
+
+    Signal.trap("INT", "DEFAULT")
+
+    if plex.select { |p| !p.eof? }.empty?
+      logger.info("all done")
+      exit 0
+    end
+
+    cmd = Readline.readline("sshplex% ", true)
+    break if cmd.nil?
+    next if cmd.empty?
+
+    plex.each do |p|
+      p.send(cmd)
+    end
   end
-
-  Signal.trap("INT", "DEFAULT")
-
-  if plex.select { |p| !p.eof? }.empty?
-    logger.info("all done")
-    exit 0
-  end
-
-  cmd = Readline.readline("sshplex% ", true)
-  break if cmd.nil?
-  next if cmd.empty?
-
-  plex.each do |p|
-    p.send(cmd)
-  end
+rescue Interrupt
+  logger.info("interrupted at prompt")
+  exit 1
 end
