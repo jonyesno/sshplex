@@ -71,10 +71,16 @@ class Plex
   end
 
   def open
-    @ssh = Net::SSH.start(@hostname,
-                          @user,
-                          forward_agent: @agent,
-                          logger: @logger)
+    begin
+      @ssh = Net::SSH.start(@hostname,
+                            @user,
+                            forward_agent: @agent,
+                            logger: @logger)
+    rescue SocketError => e
+      @logger.error("can't conect to #{@hostname}: #{e}")
+      @ssh = nil
+    end
+
     case @mode
     when :exec
       @idle = true  # exec channel is opened every time, so consider it idle at start
@@ -85,6 +91,8 @@ class Plex
   end
 
   def shell
+    return unless @ssh
+
     @shell = @ssh.open_channel do |channel|
       @logger.info("opened shell channel to #{@hostname}")
 
@@ -119,6 +127,8 @@ class Plex
   end
 
   def exec(cmd)
+    return unless @ssh
+
     @exec = @ssh.open_channel do |channel|
       @logger.info("opened exec channel to #{@hostname}")
 
@@ -184,6 +194,8 @@ class Plex
   end
 
   def send(data)
+    return if @eof
+
     @idle = false
 
     case @mode
@@ -207,13 +219,18 @@ class Plex
     end
   end
 
-  def idle?
-    @idle
+  def connected?
+    !@ssh.nil?
   end
 
   def eof?
     @eof
   end
+
+  def idle?
+    @idle
+  end
+
 end
 
 class Outputter
@@ -260,13 +277,16 @@ when :tmux
   out = -> (h) { Outputter.new(h, pipe) }
 end
 
-plex = hosts.map { |h| Plex.new(h,
-                                agent:  options[:forward_agent],
-                                logger: logger,
-                                mode:   options[:mode],
-                                out:    out.call(h),
-                                user:   options[:user],
-                               ) }
+plex = hosts
+  .map { |h| Plex.new(h,
+                      agent:  options[:forward_agent],
+                      logger: logger,
+                      mode:   options[:mode],
+                      out:    out.call(h),
+                      user:   options[:user],
+                     ) }
+  .select { |p| p.connected? }
+
 Readline.vi_editing_mode
 
 loop do
