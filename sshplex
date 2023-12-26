@@ -4,6 +4,7 @@ require 'etc'
 require 'logger'
 require 'net/ssh'
 require 'optparse'
+require 'parallel'
 require 'reline'
 
 Readline = Reline
@@ -306,6 +307,13 @@ begin
     Signal.trap("INT") { plex.map { |p| p.etx! } }
 
     while pending.length > 0
+      if Time.now - timestamp > 10
+        done = plex.select { |p| p.eof? || p.idle? }.map(&:hostname)
+        wait = plex.map(&:hostname) - done
+        cli_logger.info("done: #{done.join(',')} waiting: #{wait.join(',')}")
+        timestamp = Time.now
+      end
+
       p = pending.shift
 
       p.process
@@ -331,6 +339,7 @@ begin
     plex.each do |p|
       p.send(cmd)
     end
+    timestamp = Time.now
   end
 rescue Interrupt
   logger.info("interrupted at prompt")
