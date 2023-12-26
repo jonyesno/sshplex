@@ -50,34 +50,14 @@ op.parse!
 hosts = ARGV
 raise OptionParser::MissingArgument, "\n#{op.banner}" if hosts.empty?
 
-
 plex_logger = Logger.new(STDERR, level: Logger.const_get(options[:loglevel].upcase))
-cli_logger =  Logger.new(STDERR, level: Logger::INFO)
+cli_logger  = Logger.new(STDERR, level: Logger::INFO)
 
 case options[:output]
 when :same
-  out = -> (h) { Output.new(h, STDOUT) }
+  out = Output.stdout
 when :tmux
-  raise RuntimeError, "no tmux session" unless ENV['TMUX']
-
-  %x[ tmux select-pane -T sshplex ]
-  tmux_window = %x[ tmux display-message -p '#W' ].chomp
-  tmux_panes  = %x[ tmux list-panes -t #{tmux_window} -F '#T #P' ]
-    .split(/\n/)
-    .map(&:split)
-    .to_h
-
-  if tmux_panes.keys.include?("log")
-    logger.debug("old log pane found, killing")
-    %x[ tmux kill-pane -t #{tmux_panes['log']} ]
-  end
-
-  logger.debug("splitting new log pane")
-  pipe = IO.popen("tmux split-pane -v -l 80% -b -I", "w+")
-  %x[ tmux select-pane -T log ]
-  %x[ tmux select-pane -l ]
-
-  out = -> (h) { Output.new(h, pipe) }
+  out = Output.tmux
 end
 
 plex = Parallel.map(hosts, in_threads: 4) { |h|
@@ -108,7 +88,8 @@ begin
       if Time.now - timestamp > 10
         done = plex.select { |p| p.eof? || p.idle? }.map(&:hostname)
         wait = plex.map(&:hostname) - done
-        cli_logger.info("done: #{done.join(',')} waiting: #{wait.join(',')}")
+        cli_logger.info("done: #{done.join(',')}")
+        cli_logger.info("wait: #{wait.join(',')}")
         timestamp = Time.now
       end
 
@@ -126,7 +107,7 @@ begin
     Signal.trap("INT", "DEFAULT")
 
     if plex.select { |p| !p.eof? }.empty?
-      logger.info("all done")
+      cli_logger.info("all done")
       exit 0
     end
 
@@ -143,3 +124,5 @@ rescue Interrupt
   logger.info("interrupted at prompt")
   exit 1
 end
+
+Output.cleanup
