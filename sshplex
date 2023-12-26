@@ -49,6 +49,7 @@ op.parse!
 
 hosts = ARGV
 raise OptionParser::MissingArgument, "\n#{op.banner}" if hosts.empty?
+hostlen = hosts.map(&:length).max
 
 plex_logger = Logger.new(STDERR, level: Logger.const_get(options[:loglevel].upcase))
 cli_logger  = Logger.new(STDERR, level: Logger::INFO)
@@ -66,7 +67,7 @@ plex = Parallel.map(hosts, in_threads: 4) { |h|
                   agent:  options[:forward_agent],
                   logger: plex_logger,
                   mode:   options[:mode],
-                  out:    out.call(h),
+                  out:    out.call(h.rjust(hostlen)),
                   user:   options[:user],
                  )
 
