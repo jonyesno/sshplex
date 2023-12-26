@@ -252,7 +252,8 @@ class Outputter
   end
 end
 
-logger = Logger.new(STDERR, level: Logger.const_get(options[:loglevel].upcase))
+plex_logger = Logger.new(STDERR, level: Logger.const_get(options[:loglevel].upcase))
+cli_logger =  Logger.new(STDERR, level: Logger::INFO)
 
 case options[:output]
 when :same
@@ -280,17 +281,23 @@ when :tmux
   out = -> (h) { Outputter.new(h, pipe) }
 end
 
-plex = hosts
-  .map { |h| Plex.new(h,
-                      agent:  options[:forward_agent],
-                      logger: logger,
-                      mode:   options[:mode],
-                      out:    out.call(h),
-                      user:   options[:user],
-                     ) }
-  .select { |p| p.connected? }
+plex = Parallel.map(hosts, in_threads: 4) { |h|
+  cli_logger.info("connecting to #{h}")
+  plex = Plex.new(h,
+                  agent:  options[:forward_agent],
+                  logger: plex_logger,
+                  mode:   options[:mode],
+                  out:    out.call(h),
+                  user:   options[:user],
+                 )
+
+  cli_logger.info("connected to #{h}")
+  plex
+}.select { |p| p.connected? }
 
 Readline.vi_editing_mode
+
+timestamp = Time.now
 
 begin
   loop do
@@ -306,6 +313,7 @@ begin
       next if p.eof?
       next if p.idle?
 
+      cli_logger.debug("requeue #{p.hostname}")
       pending.push(p)
     end
 
