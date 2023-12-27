@@ -21,8 +21,6 @@ class Plex
     @eof  = false
 
     @prompt = Regexp.new('(^% | \d+ # | \d+ \$ )$') # ymmv
-
-    self.open
   end
 
   def open

@@ -52,8 +52,12 @@ op = OptionParser.new do |opts|
 end
 op.parse!
 
+filter = Regexp.new(".")
 if options[:hostfile]
   hosts = File.readlines(options[:hostfile]).map(&:chomp)
+  if ARGV.length
+    filter = Regexp.union(ARGV)
+  end
 else
   hosts = ARGV
 end
@@ -70,21 +74,19 @@ when :same
 when :tmux
   out = Output.tmux
 end
-filter = Regexp.new(".")
 
-plex = Parallel.map(hosts, in_threads: 12) { |h|
-  cli_logger.info("connecting to #{h}")
-  plex = Plex.new(h,
-                  agent:  options[:forward_agent],
-                  logger: plex_logger,
-                  mode:   options[:mode],
-                  out:    out.call(h.rjust(hostlen)),
-                  user:   options[:user],
-                 )
+plex = hosts.map { |h| Plex.new(h,
+                                agent:  options[:forward_agent],
+                                logger: plex_logger,
+                                mode:   options[:mode],
+                                out:    out.call(h.rjust(hostlen)),
+                                user:   options[:user]) }
 
-  cli_logger.info("connected to #{h}")
-  plex
-}.select { |p| p.connected? }
+Parallel.map(plex.select { |p| filter.match(p.hostname) }, in_threads: 12) { |p|
+  cli_logger.info("connecting to #{p.hostname}")
+  p.open
+  cli_logger.info("connected  to #{p.hostname}")
+}
 
 Readline.vi_editing_mode
 
@@ -92,9 +94,7 @@ timestamp = Time.now
 
 begin
   loop do
-    pending = plex
-      .select { |p| !p.eof? }
-      # .select { |p| filter.match(p.hostname) }
+    pending = plex.select { |p| p.connected? && !p.eof? }
 
     Signal.trap("INT") { plex.map { |p| p.etx! } }
 
@@ -129,8 +129,15 @@ begin
     break if cmd.nil?
     next if cmd.empty?
 
+    timestamp = Time.now
+
     if patterns = cmd[/^:on (.*)$/, 1]
       filter = Regexp.union(patterns.split)
+      Parallel.map(plex.select { |p| filter.match(p.hostname) }, in_threads: 12) { |p|
+        cli_logger.info("connecting to #{p.hostname}")
+        p.open unless p.connected?
+        cli_logger.info("connected  to #{p.hostname}")
+      }
       next
     end
 
@@ -138,7 +145,6 @@ begin
       .filter { |p| filter.match(p.hostname) }
       .each { |p| p.send(cmd) }
 
-    timestamp = Time.now
   end
 rescue Interrupt
   logger.info("interrupted at prompt")
