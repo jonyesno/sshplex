@@ -20,7 +20,7 @@ class Plex
     @idle = false
     @eof  = false
 
-    @prompt = Regexp.new('(^% | \d+ \$ )$') # ymmv
+    @prompt = Regexp.new('(^% | \d+ # | \d+ \$ )$') # ymmv
 
     self.open
   end

@@ -20,9 +20,15 @@ op = OptionParser.new do |opts|
   options[:forward_agent] = false
   opts.on("-A", "--forward-agent") { options[:forward_agent] = true }
 
-  options[:user] = nil
-  opts.on("-u", "--user=USER",
-          "remote ssh user") { |o| options[:user] = o }
+  options[:hostfile] = nil
+  opts.on("-f", "--hosts-file=HOSTS") { |h| options[:hostfile] = h }
+
+  options[:loglevel] = :error
+  opts.on("-l", "--log-level=LEVEL",
+          [ :debug, :info, :warn, :error, :fatal ]) { |o| options[:loglevel ] = o }
+  opts.on("-v", "--verbose",
+          "same as --log-level debug") { options[:loglevel] = :debug }
+
 
   options[:mode] = :exec
   opts.on("-m", "--mode=(exec|shell)",
@@ -34,11 +40,10 @@ op = OptionParser.new do |opts|
   opts.on("-t", "--tmux",
           "use tmux split pane for output") { options[:output] = :tmux }
 
-  options[:loglevel] = :error
-  opts.on("-l", "--log-level=LEVEL",
-          [ :debug, :info, :warn, :error, :fatal ]) { |o| options[:loglevel ] = o }
-  opts.on("-v", "--verbose",
-          "same as --log-level debug") { options[:loglevel] = :debug }
+  options[:user] = nil
+  opts.on("-u", "--user=USER",
+          "remote ssh user") { |o| options[:user] = o }
+
 
   opts.on("-h", "--help") do
     puts opts
@@ -47,7 +52,12 @@ op = OptionParser.new do |opts|
 end
 op.parse!
 
-hosts = ARGV
+if options[:hostfile]
+  hosts = File.readlines(options[:hostfile]).map(&:chomp)
+else
+  hosts = ARGV
+end
+
 raise OptionParser::MissingArgument, "\n#{op.banner}" if hosts.empty?
 hostlen = hosts.map(&:length).max
 
@@ -60,8 +70,9 @@ when :same
 when :tmux
   out = Output.tmux
 end
+filter = Regexp.new(".")
 
-plex = Parallel.map(hosts, in_threads: 4) { |h|
+plex = Parallel.map(hosts, in_threads: 12) { |h|
   cli_logger.info("connecting to #{h}")
   plex = Plex.new(h,
                   agent:  options[:forward_agent],
@@ -81,7 +92,9 @@ timestamp = Time.now
 
 begin
   loop do
-    pending = plex.select { |p| !p.eof? }
+    pending = plex
+      .select { |p| !p.eof? }
+      # .select { |p| filter.match(p.hostname) }
 
     Signal.trap("INT") { plex.map { |p| p.etx! } }
 
@@ -116,9 +129,15 @@ begin
     break if cmd.nil?
     next if cmd.empty?
 
-    plex.each do |p|
-      p.send(cmd)
+    if patterns = cmd[/^:on (.*)$/, 1]
+      filter = Regexp.union(patterns.split)
+      next
     end
+
+    plex
+      .filter { |p| filter.match(p.hostname) }
+      .each { |p| p.send(cmd) }
+
     timestamp = Time.now
   end
 rescue Interrupt
