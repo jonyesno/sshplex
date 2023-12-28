@@ -20,8 +20,8 @@ op = OptionParser.new do |opts|
   options[:forward_agent] = false
   opts.on("-A", "--forward-agent") { options[:forward_agent] = true }
 
-  options[:hostfile] = nil
-  opts.on("-f", "--hosts-file=HOSTS") { |h| options[:hostfile] = h }
+  options[:hosts_file] = nil
+  opts.on("-f", "--hosts=HOSTS") { |h| options[:hosts_file] = h }
 
   options[:loglevel] = :error
   opts.on("-l", "--log-level=LEVEL",
@@ -53,9 +53,9 @@ end
 op.parse!
 
 filter = Regexp.new(".")
-if options[:hostfile]
-  hosts = File.readlines(options[:hostfile]).map(&:chomp)
-  if ARGV.length > 1
+if options[:hosts_file]
+  hosts = File.readlines(options[:hosts_file]).map(&:chomp)
+  if ARGV.length > 0
     filter = Regexp.union(ARGV)
   end
 else

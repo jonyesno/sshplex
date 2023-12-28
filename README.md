@@ -35,7 +35,7 @@ eg:
 % sshplex db01.zomo.co.uk db02.zomo.co.uk
 ```
 
-* from a file passed as the `--hosts-file` parameter
+* from a file passed as the `--hosts` parameter
 
 In this second form further command line arguments are treated as regular
 expression alternatives to filter the provided host lists. During the `sshplex`
@@ -44,7 +44,7 @@ session this filter can be further revised using the `:on` control command.
 eg:
 
 ```
-% sshplex --hosts-file server.list db proxy
+% sshplex --hosts server.list db proxy
 ```
 
 would filter `server.list` using the regular expression `(db|proxy)` and limit
