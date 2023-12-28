@@ -94,14 +94,18 @@ timestamp = Time.now
 
 begin
   loop do
-    pending = plex.select { |p| p.connected? && !p.eof? }
+    active = plex
+      .select { |p| p.connected? && !p.eof? }
+      .select { |p| filter.match(p.hostname) }
+
+    pending = active.dup
 
     Signal.trap("INT") { plex.map { |p| p.etx! } }
 
     while pending.length > 0
       if Time.now - timestamp > 10
-        done = plex.select { |p| p.eof? || p.idle? }.map(&:hostname)
-        wait = plex.map(&:hostname) - done
+        done = active.select { |p| p.eof? || p.idle? }.map(&:hostname)
+        wait = active.map(&:hostname) - done
         cli_logger.info("done: #{done.join(',')}")
         cli_logger.info("wait: #{wait.join(',')}")
         timestamp = Time.now
