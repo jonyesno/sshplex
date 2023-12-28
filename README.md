@@ -23,6 +23,33 @@ When a SSH channel is in `shell` mode you don't know when a command is
 complete. Instead, you watch the output for your shell's prompt to reappear.
 With a regex. This is somewhat fragile.
 
+## Host lists and filtering
+
+Hosts are specified in two ways
+
+* as a list on the command line
+
+eg:
+
+```
+% sshplex db01.zomo.co.uk db02.zomo.co.uk
+```
+
+* from a file passed as the `--hosts-file` parameter
+
+In this second form further command line arguments are treated as regular
+expression alternatives to filter the provided host lists. During the `sshplex`
+session this filter can be further revised using the `:on` control command.
+
+eg:
+
+```
+% sshplex --hosts-file server.list db proxy
+```
+
+would filter `server.list` using the regular expression `(db|proxy)` and limit
+the `sshplex` session to those hosts.
+
 ## Requirements
 
 Ruby, Bundler. See `Gemfile`
