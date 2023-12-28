@@ -55,7 +55,7 @@ op.parse!
 filter = Regexp.new(".")
 if options[:hostfile]
   hosts = File.readlines(options[:hostfile]).map(&:chomp)
-  if ARGV.length
+  if ARGV.length > 1
     filter = Regexp.union(ARGV)
   end
 else
