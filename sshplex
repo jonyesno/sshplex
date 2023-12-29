@@ -2,13 +2,12 @@
 
 require 'etc'
 require 'logger'
-require 'net/ssh'
 require 'optparse'
-require 'parallel'
 require 'reline'
 require 'yaml'
 
 $:.push('.')
+require 'manager'
 require 'output'
 require 'plex'
 
@@ -60,18 +59,19 @@ op = OptionParser.new do |opts|
 end
 op.parse!
 
-filter = Regexp.new(".")
+hosts  = []
+filter = []
+
 if options[:hosts_file]
   hosts = File.readlines(options[:hosts_file]).map(&:chomp)
   if ARGV.length > 0
-    filter = Regexp.union(ARGV)
+    filter = ARGV
   end
 else
   hosts = ARGV
 end
 
 raise OptionParser::MissingArgument, "\n#{op.banner}" if hosts.empty?
-hostlen = hosts.map(&:length).max
 
 plex_logger = Logger.new(STDERR, level: Logger.const_get(options[:loglevel].upcase))
 cli_logger  = Logger.new(STDERR, level: Logger::INFO)
@@ -83,105 +83,29 @@ when :tmux
   out = Output.tmux
 end
 
-plex = hosts.map { |h| Plex.new(h,
-                                agent:  options[:forward_agent],
-                                logger: plex_logger,
-                                mode:   options[:mode],
-                                out:    out.call(h.rjust(hostlen)),
-                                user:   options[:user]) }
+manager = Manager.new(hosts,
+                      alias:       options[:alias],
+                      agent:       options[:forward_agent],
+                      cli_logger:  cli_logger,
+                      filter:      filter,
+                      plex_logger: plex_logger,
+                      mode:        options[:mode],
+                      out:         out,
+                      user:        options[:user])
 
-Parallel.map(plex.select { |p| filter.match(p.hostname) }, in_threads: 12) { |p|
-  cli_logger.info("connecting to #{p.hostname}")
-  p.open
-  cli_logger.info("connected  to #{p.hostname}")
-}
 
 Readline.vi_editing_mode
 
-timestamp = Time.now
+
+at_exit { Output.cleanup }
 
 begin
   loop do
-    active = plex
-      .select { |p| p.connected? && !p.eof? }
-      .select { |p| filter.match(p.hostname) }
-
-    pending = active.dup
-
-    Signal.trap("INT") { plex.map { |p| p.etx! } }
-
-    while pending.length > 0
-      if Time.now - timestamp > 10
-        done = active.select { |p| p.eof? || p.idle? }.map(&:hostname)
-        wait = active.map(&:hostname) - done
-        cli_logger.info("done: #{done.join(',')}")
-        cli_logger.info("wait: #{wait.join(',')}")
-        timestamp = Time.now
-      end
-
-      p = pending.shift
-
-      p.process
-
-      next if p.eof?
-      next if p.idle?
-
-      cli_logger.debug("requeue #{p.hostname}")
-      pending.push(p)
-    end
-
-    Signal.trap("INT", "DEFAULT")
-
-    if plex.select { |p| !p.eof? }.empty?
-      cli_logger.info("all done")
-      exit 0
-    end
-
-    cmd = Readline.readline("sshplex% ", true)
-    break if cmd.nil?
-    next if cmd.empty?
-
-    timestamp = Time.now
-
-    if ctrl_cmd = cmd[/^:(\w+)/, 1]
-      case ctrl_cmd
-      when 'on'
-        if patterns = cmd[/^:on (.*)$/, 1]
-          filter = Regexp.union(patterns.split)
-          cli_logger.info("host filter #{filter}")
-          Parallel.map(plex.select { |p| filter.match(p.hostname) }, in_threads: 12) { |p|
-            cli_logger.info("connecting to #{p.hostname}")
-            p.open unless p.connected?
-            cli_logger.info("connected  to #{p.hostname}")
-          }
-          next
-        else
-          cli_logger.info("didn't update host filter")
-        end
-      else
-        if new_cmd = options[:alias][ctrl_cmd]
-          Readline.pre_input_hook = -> {
-            Readline.insert_text(new_cmd)
-            Readline.redisplay
-            Readline.pre_input_hook = nil
-          }
-          next
-        else
-          cli_logger.info("didn't expand alias #{ctrl_cmd}")
-        end
-      end
-    end
-
-    Readline::HISTORY.push cmd
-
-    plex
-      .filter { |p| filter.match(p.hostname) }
-      .each { |p| p.send(cmd) }
-
+    manager.process
+    manager.prompt
   end
 rescue Interrupt
-  logger.info("interrupted at prompt")
+  cli_logger.info("interrupted at prompt")
   exit 1
 end
 
-Output.cleanup

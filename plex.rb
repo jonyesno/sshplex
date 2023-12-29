@@ -1,3 +1,5 @@
+require 'net/ssh'
+
 class Plex
   attr_reader :hostname
 
