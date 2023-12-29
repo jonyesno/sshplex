@@ -6,6 +6,7 @@ require 'net/ssh'
 require 'optparse'
 require 'parallel'
 require 'reline'
+require 'yaml'
 
 $:.push('.')
 require 'output'
@@ -13,37 +14,44 @@ require 'plex'
 
 Readline = Reline
 
-options = {}
+options = {
+  :forward_agent => false,
+  :hosts_file    => nil,
+  :loglevel      => :error,
+  :mode          => :exec,
+  :output        => :inline,
+  :user          => nil,
+
+  :alias         => {},
+}
+
+CONFIG="#{__dir__}/.sshplex.yml"
+if File.exist?(CONFIG)
+  options.merge!(YAML::load_file(CONFIG).transform_keys(&:to_sym))
+end
+
 op = OptionParser.new do |opts|
   opts.banner  = "usage: sshplex [ options ] hosts"
 
-  options[:forward_agent] = false
   opts.on("-A", "--forward-agent") { options[:forward_agent] = true }
 
-  options[:hosts_file] = nil
   opts.on("-f", "--hosts=HOSTS") { |h| options[:hosts_file] = h }
 
-  options[:loglevel] = :error
   opts.on("-l", "--log-level=LEVEL",
           [ :debug, :info, :warn, :error, :fatal ]) { |o| options[:loglevel ] = o }
   opts.on("-v", "--verbose",
           "same as --log-level debug") { options[:loglevel] = :debug }
 
-
-  options[:mode] = :exec
   opts.on("-m", "--mode=(exec|shell)",
           [ :exec, :shell ]) { |o| options[:mode] = o }
   opts.on("-e", "--exec",  "same as --mode exec")  { options[:mode] = :exec }
   opts.on("-s", "--shell", "same as --mode shell") { options[:mode] = :shell }
 
-  options[:output] = :same
   opts.on("-t", "--tmux",
           "use tmux split pane for output") { options[:output] = :tmux }
 
-  options[:user] = nil
   opts.on("-u", "--user=USER",
           "remote ssh user") { |o| options[:user] = o }
-
 
   opts.on("-h", "--help") do
     puts opts
@@ -69,7 +77,7 @@ plex_logger = Logger.new(STDERR, level: Logger.const_get(options[:loglevel].upca
 cli_logger  = Logger.new(STDERR, level: Logger::INFO)
 
 case options[:output]
-when :same
+when :inline
   out = Output.stdout
 when :tmux
   out = Output.tmux
@@ -135,15 +143,36 @@ begin
 
     timestamp = Time.now
 
-    if patterns = cmd[/^:on (.*)$/, 1]
-      filter = Regexp.union(patterns.split)
-      Parallel.map(plex.select { |p| filter.match(p.hostname) }, in_threads: 12) { |p|
-        cli_logger.info("connecting to #{p.hostname}")
-        p.open unless p.connected?
-        cli_logger.info("connected  to #{p.hostname}")
-      }
-      next
+    if ctrl_cmd = cmd[/^:(\w+)/, 1]
+      case ctrl_cmd
+      when 'on'
+        if patterns = cmd[/^:on (.*)$/, 1]
+          filter = Regexp.union(patterns.split)
+          cli_logger.info("host filter #{filter}")
+          Parallel.map(plex.select { |p| filter.match(p.hostname) }, in_threads: 12) { |p|
+            cli_logger.info("connecting to #{p.hostname}")
+            p.open unless p.connected?
+            cli_logger.info("connected  to #{p.hostname}")
+          }
+          next
+        else
+          cli_logger.info("didn't update host filter")
+        end
+      else
+        if new_cmd = options[:alias][ctrl_cmd]
+          Readline.pre_input_hook = -> {
+            Readline.insert_text(new_cmd)
+            Readline.redisplay
+            Readline.pre_input_hook = nil
+          }
+          next
+        else
+          cli_logger.info("didn't expand alias #{ctrl_cmd}")
+        end
+      end
     end
+
+    Readline::HISTORY.push cmd
 
     plex
       .filter { |p| filter.match(p.hostname) }
