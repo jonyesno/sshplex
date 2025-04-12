@@ -7,9 +7,8 @@ require 'reline'
 require 'yaml'
 
 $:.push('.')
-require 'manager'
+require 'multi'
 require 'output'
-require 'plex'
 
 Readline = Reline
 
@@ -59,11 +58,16 @@ op = OptionParser.new do |opts|
 end
 op.parse!
 
+
+plex_logger = Logger.new(STDERR, level: Logger.const_get(options[:loglevel].upcase))
+cli_logger  = Logger.new(STDERR, level: Logger::INFO)
+
 hosts  = []
 filter = []
 
 if options[:hosts_file]
   hosts = File.readlines(options[:hosts_file]).map(&:chomp)
+  cli_logger.info("reading hosts file #{options[:hosts_file]}")
   if ARGV.length > 0
     filter = ARGV
   end
@@ -73,9 +77,6 @@ end
 
 raise OptionParser::MissingArgument, "\n#{op.banner}" if hosts.empty?
 
-plex_logger = Logger.new(STDERR, level: Logger.const_get(options[:loglevel].upcase))
-cli_logger  = Logger.new(STDERR, level: Logger::INFO)
-
 case options[:output]
 when :inline
   out = Output.stdout
@@ -83,26 +84,33 @@ when :tmux
   out = Output.tmux
 end
 
-manager = Manager.new(hosts,
-                      alias:       options[:alias],
-                      agent:       options[:forward_agent],
-                      cli_logger:  cli_logger,
-                      filter:      filter,
-                      plex_logger: plex_logger,
-                      mode:        options[:mode],
-                      out:         out,
-                      user:        options[:user])
+multi = Multi.new(hosts,
+                  alias:        options[:alias],
+                  agent:        options[:forward_agent],
+                  cli_logger:   cli_logger,
+                  filter:       filter,
+                  multi_logger: plex_logger,
+                  mode:         options[:mode],
+                  out:          out,
+                  user:         options[:user])
 
 
 Readline.vi_editing_mode
 
-
 at_exit { Output.cleanup }
+
+multi.configure
 
 begin
   loop do
-    manager.process
-    manager.prompt
+    case options[:mode]
+    when :exec
+      multi.exec(multi.prompt)
+    when :shell
+      raise 'nyi'
+    else
+      raise "unknown mode #{options[:mode]}"
+    end
   end
 rescue Interrupt
   cli_logger.info("interrupted at prompt")
