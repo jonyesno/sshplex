@@ -26,6 +26,7 @@ class Multi
 
     @multi = Net::SSH::Multi.start
 
+    @buffer = Hash.new { |h,k| h[k] = [] }
     @out = @hosts.map { |h| [h, kwargs[:out].call(h) ] }.to_h
   end
 
@@ -71,7 +72,6 @@ class Multi
   end
 
   def exec(cmd)
-    buffer = Hash.new { |h,k| h[k] = [] }
 
     multi_channel = @multi.open_channel do |channel|
       channel.request_pty do |ch, success|
@@ -82,50 +82,48 @@ class Multi
         raise "exec failed" unless success
 
         channel.on_data do |ch, data|
-          buffer[ch[:host]] << data
+          @buffer[ch[:host]] << data
         end
 
         channel.on_extended_data do |ch, data|
-          buffer[ch[:host]] << data
+          @buffer[ch[:host]] << data
         end
 
         channel.on_request("exit-status") do |ch, data|
           code = data.read_long
-          buffer[ch[:host]] << "# exit: #{code}\n"
+          @buffer[ch[:host]] << "# exit: #{code}\n"
         end
       end
     end
 
     Thread.new { @multi.loop }
 
-    all_channels = multi_channel.channels
-    inactive_channels = []
-
     while multi_channel.active?
       sleep(0.2)
+      emit_buffers(multi_channel.channels)
+    end
+    @logger.info("final")
+    emit_buffers(multi_channel.channels)
+  end
 
-      currently_active   = all_channels.select(&:active?)
-      currently_inactive = all_channels - currently_active
+  def emit_buffers(channels)
+    channels.select { |c| !c.active? }.each do |ch|
+      next if @buffer[ch[:host]].empty?
 
-      recently_inactive = currently_inactive - inactive_channels
-      next if recently_inactive.empty?
+      # join buffer lines, strip out ANSI chaos
+      clean = @buffer[ch[:host]].join.gsub(ANSI_ESCAPE_CODES, '').gsub("\r", "")
 
-      inactive_channels += recently_inactive
+      # emit all the \n terminated lines, keep the current in-progress line
+      lines   = clean.split(/\n/, -1)
+      current = lines.pop
+      emit    = lines.join("\n")
 
-      recently_inactive.each do |ch|
-        # join buffer lines, strip out ANSI chaos
-        clean = buffer[ch[:host]].join.gsub(ANSI_ESCAPE_CODES, '').gsub("\r", "")
-
-        # emit all the \n terminated lines, keep the current in-progress line
-        lines   = clean.split(/\n/, -1)
-        current = lines.pop
-        emit    = lines.join("\n")
-
-        unless emit.empty?
-          @out[ch[:host]].puts emit
-        end
-
+      unless emit.empty?
+        @out[ch[:host]].puts emit
       end
+
+      # don't emit this buffer again
+      @buffer[ch[:host]] = []
     end
   end
 end
