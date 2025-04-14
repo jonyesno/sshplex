@@ -15,6 +15,7 @@ GEM
 PLATFORMS
   amd64-freebsd-13
   arm64-darwin-22
+  arm64-darwin-23
 
 DEPENDENCIES
   bcrypt_pbkdf
