@@ -28,6 +28,8 @@ class Multi
 
     @buffer = Hash.new { |h,k| h[k] = [] }
     @out = @hosts.map { |h| [h, kwargs[:out].call(h) ] }.to_h
+
+    @prompt = Regexp.new('(^% | \d+ # | \d+ \$ )$') # ymmv
   end
 
   def configure
@@ -40,7 +42,6 @@ class Multi
           @logger.error("can't connect to #{@hostname}: #{e}")
         end
       end
-    @logger.info("configured")
   end
 
   def set_filter(regexps)
@@ -72,8 +73,9 @@ class Multi
   end
 
   def exec(cmd)
-
     multi_channel = @multi.open_channel do |channel|
+      @buffer[channel[:host]] << "# exec: #{cmd}"
+
       channel.request_pty do |ch, success|
         raise "pty failed" unless success
       end
@@ -102,28 +104,79 @@ class Multi
       sleep(0.2)
       emit_buffers(multi_channel.channels)
     end
-    @logger.info("final")
     emit_buffers(multi_channel.channels)
   end
 
-  def emit_buffers(channels)
-    channels.select { |c| !c.active? }.each do |ch|
-      next if @buffer[ch[:host]].empty?
+  def open_shell
+    @multi_channel = @multi.open_channel do |channel|
+      channel[:idle] = false
 
-      # join buffer lines, strip out ANSI chaos
-      clean = @buffer[ch[:host]].join.gsub(ANSI_ESCAPE_CODES, '').gsub("\r", "")
-
-      # emit all the \n terminated lines, keep the current in-progress line
-      lines   = clean.split(/\n/, -1)
-      current = lines.pop
-      emit    = lines.join("\n")
-
-      unless emit.empty?
-        @out[ch[:host]].puts emit
+      channel.request_pty do |ch, success|
+        raise "pty failed" unless success
       end
 
-      # don't emit this buffer again
+      channel.send_channel_request("shell") do |ch, success|
+        raise "shell failed" unless success
+
+        channel.on_data do |ch, data|
+          @buffer[ch[:host]] << data
+          if buffer_lines(Array(data)).last&.match(@prompt)
+            ch[:idle] = true
+          end
+        end
+
+        channel.on_extended_data do |ch, data|
+          @buffer[ch[:host]] << data
+        end
+
+        channel.on_request("exit-status") do |ch, data|
+          code = data.read_long
+          @buffer[ch[:host]] << "# exit: #{code}\n"
+        end
+
+        ch.on_request("exit-signal") do |ch, data|
+          signal = data.read_long
+          @buffer[ch[:host]] << "# signal: #{signal}\n"
+        end
+      end
+    end
+
+    @multi.loop { @multi_channel.channels.any? { |ch| !ch[:idle] } }
+    emit_buffers(@multi_channel.channels)
+  end
+
+  def send_shell(cmd)
+    @multi_channel.channels.each do |ch|
+      ch[:idle] = false
+      @buffer[ch[:host]] << "sshplex % "
+      ch.send_data("#{cmd}\n")
+    end
+
+    # just @multi.loop { } here breaks agent channels somehow
+    Thread.new { @multi.loop { @multi_channel.channels.any? { |ch| !ch[:idle] } } }
+
+    while @multi_channel.channels.any? { |ch| !ch[:idle] }
+      sleep(0.2)
+      emit_buffers(@multi_channel.channels)
+    end
+    emit_buffers(@multi_channel.channels)
+  end
+
+  def emit_buffers(channels)
+    channels.select { |c| !c.active? || c[:idle] }.each do |ch|
+      next if @buffer[ch[:host]].empty?
+
+      lines = buffer_lines(@buffer[ch[:host]])
+      lines = buffer_lines(@buffer[ch[:host]])
+      unless lines.empty?
+        @out[ch[:host]].puts lines.join("\n")
+      end
+
       @buffer[ch[:host]] = []
     end
+  end
+
+  def buffer_lines(buffer)
+    buffer.join.gsub(ANSI_ESCAPE_CODES, '').gsub("\r", "").split("\n")
   end
 end

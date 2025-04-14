@@ -102,15 +102,18 @@ at_exit { Output.cleanup }
 multi.configure
 
 begin
-  loop do
-    case options[:mode]
-    when :exec
+  case options[:mode]
+  when :exec
+    loop do
       multi.exec(multi.prompt)
-    when :shell
-      raise 'nyi'
-    else
-      raise "unknown mode #{options[:mode]}"
     end
+  when :shell
+    multi.open_shell
+    loop do
+      multi.send_shell(multi.prompt)
+    end
+  else
+    raise "unknown mode #{options[:mode]}"
   end
 rescue Interrupt
   cli_logger.info("interrupted at prompt")
