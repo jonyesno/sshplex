@@ -23,6 +23,7 @@ class Multi
     @alias  = kwargs[:alias]
     @logger = kwargs[:multi_logger]
     @mode   = kwargs[:mode]
+    @user   = kwargs[:user] || ENV['USER']
 
     @multi = Net::SSH::Multi.start
 
@@ -37,7 +38,7 @@ class Multi
       .tap { |h| @logger.info("adding host #{h}") }
       .map do |h|
         begin
-          @multi.use(h, forward_agent: true, logger: @logger)
+          @multi.use(h, forward_agent: true, logger: @logger, user: @user)
         rescue *CONNECTION_ERRORS => e
           @logger.error("can't connect to #{@hostname}: #{e}")
         end
