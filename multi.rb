@@ -1,10 +1,9 @@
+require 'buffer'
 require 'net/ssh/multi'
 
 class Multi
   attr_accessor :hosts
 
-  # https://stackoverflow.com/a/29497680
-  ANSI_ESCAPE_CODES = Regexp.new('[\u001b\u009b][\[();?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><]')
 
   CONNECTION_ERRORS = [
     Errno::ECONNREFUSED,
@@ -27,7 +26,7 @@ class Multi
 
     @multi = Net::SSH::Multi.start
 
-    @buffer = Hash.new { |h,k| h[k] = [] }
+    @buffer = Hash.new { |h,k| h[k] = Buffer.new }
     @out = @hosts.map { |h| [h, kwargs[:out].call(h) ] }.to_h
 
     @prompt = Regexp.new('(^% | \d+ # | \d+ \$ )$') # ymmv
@@ -75,7 +74,7 @@ class Multi
 
   def exec(cmd)
     multi_channel = @multi.open_channel do |channel|
-      @buffer[channel[:host]] << "# exec: #{cmd}"
+      @buffer[channel[:host]].append("# exec: #{cmd}")
 
       channel.request_pty do |ch, success|
         raise "pty failed" unless success
@@ -85,16 +84,16 @@ class Multi
         raise "exec failed" unless success
 
         channel.on_data do |ch, data|
-          @buffer[ch[:host]] << data
+          @buffer[ch[:host]].append(data)
         end
 
         channel.on_extended_data do |ch, data|
-          @buffer[ch[:host]] << data
+          @buffer[ch[:host]].append(data)
         end
 
         channel.on_request("exit-status") do |ch, data|
           code = data.read_long
-          @buffer[ch[:host]] << "# exit: #{code}\n"
+          @buffer[ch[:host]].append("# exit: #{code}\n")
         end
       end
     end
@@ -120,24 +119,24 @@ class Multi
         raise "shell failed" unless success
 
         channel.on_data do |ch, data|
-          @buffer[ch[:host]] << data
-          if buffer_lines(Array(data)).last&.match(@prompt)
+          @buffer[ch[:host]].append(data)
+          if @buffer[ch[:host]].last_line.match(@prompt)
             ch[:idle] = true
           end
         end
 
         channel.on_extended_data do |ch, data|
-          @buffer[ch[:host]] << data
+          @buffer[ch[:host]].append(data)
         end
 
         channel.on_request("exit-status") do |ch, data|
           code = data.read_long
-          @buffer[ch[:host]] << "# exit: #{code}\n"
+          @buffer[ch[:host]].append("# exit: #{code}\n")
         end
 
         ch.on_request("exit-signal") do |ch, data|
           signal = data.read_long
-          @buffer[ch[:host]] << "# signal: #{signal}\n"
+          @buffer[ch[:host]].append("signal: #{signal}\n")
         end
       end
     end
@@ -149,7 +148,8 @@ class Multi
   def send_shell(cmd)
     @multi_channel.channels.each do |ch|
       ch[:idle] = false
-      @buffer[ch[:host]] << "sshplex % "
+      # @buffer[ch[:host]] << "sshplex % "
+      @buffer[ch[:host]].ignore(cmd)
       ch.send_data("#{cmd}\n")
     end
 
@@ -167,17 +167,13 @@ class Multi
     channels.select { |c| !c.active? || c[:idle] }.each do |ch|
       next if @buffer[ch[:host]].empty?
 
-      lines = buffer_lines(@buffer[ch[:host]])
-      lines = buffer_lines(@buffer[ch[:host]])
+      lines = (@buffer[ch[:host]]).out
       unless lines.empty?
         @out[ch[:host]].puts lines.join("\n")
       end
 
-      @buffer[ch[:host]] = []
+      @buffer[ch[:host]].empty
     end
   end
 
-  def buffer_lines(buffer)
-    buffer.join.gsub(ANSI_ESCAPE_CODES, '').gsub("\r", "").split("\n")
-  end
 end
