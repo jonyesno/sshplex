@@ -1,5 +1,7 @@
 # sshplex
 
+NOTE: this has been superceded by a Python rewrite at https://codeberg.org/jonyesno/sshplex
+
 ## Overview
 
 `sshplex` is just another SSH multiplexer that sends commands to multiple
